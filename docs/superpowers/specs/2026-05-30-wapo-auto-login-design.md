@@ -19,7 +19,7 @@ Goal: automate the re-authentication so it runs unattended on `seattle-server` o
 
 ## Confirmed facts from prior research
 
-Source: prior mailbox audit of `hermosillaignacio@gmail.com`.
+Source: prior mailbox audit of the operator's inbox.
 
 - nach is a confirmed SPL patron (OverDrive hold notices in inbox).
 - WaPo sends a recurring **"Your free trial has been activated!"** email from `updates@comms.mail.washingtonpost.com` with internal subject "Subscription Confirmation and Account Details". At least 10 such emails since 2025-10-19, with gaps of 9–39 days.

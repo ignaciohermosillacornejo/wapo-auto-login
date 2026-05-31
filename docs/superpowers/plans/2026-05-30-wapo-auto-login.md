@@ -809,7 +809,7 @@ cp secrets.env.example secrets.env
 op run --env-file=secrets.env -- bash -c 'echo "email: $WAPO_EMAIL  password length: ${#WAPO_PASSWORD}"'
 ```
 
-Expected: prints something like `email: hermosillaignacio@gmail.com  password length: 24`. If `$WAPO_PASSWORD` length is 0, fix the op:// reference in `secrets.env`.
+Expected: prints something like `email: user@example.com  password length: 24`. If `$WAPO_PASSWORD` length is 0, fix the op:// reference in `secrets.env`.
 
 - [ ] **Step 5: First end-to-end run (empty profile → full login expected)**
 
