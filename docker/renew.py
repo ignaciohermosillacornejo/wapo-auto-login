@@ -105,6 +105,9 @@ def main() -> int:
             viewport={"width": 1280, "height": 800},
             args=["--disable-blink-features=AutomationControlled"],
         )
+        # Tracing is intentionally only persisted on the exception path
+        # (see `dump_debug`). On a clean run, the trace is discarded — we
+        # don't need to keep ~10 MB of artifacts for every successful run.
         ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
         page = ctx.new_page()
 
@@ -128,9 +131,11 @@ def main() -> int:
                 return 0
 
             # Sign-in path. Arm the activation-API waiter, then drive the form.
+            # 120s budget = ~30s for goto + ~25s for two-step sign-in + slack
+            # for a slow network round-trip to the activation API.
             with page.expect_response(
                 lambda r: r.url == ACTIVATION_API_URL and r.status == 200,
-                timeout=90_000,
+                timeout=120_000,
             ) as response_info:
                 sign_in_if_needed(
                     page, wapo_email=wapo_email, wapo_password=wapo_password,

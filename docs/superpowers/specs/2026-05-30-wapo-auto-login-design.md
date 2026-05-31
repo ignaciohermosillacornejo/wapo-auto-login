@@ -96,7 +96,8 @@ Container (Debian + Xvfb + headful Chromium + Playwright Python)
 /home/nach/wapo-auto-login/
 ├── docker/
 │   ├── Dockerfile              # mcr.microsoft.com/playwright/python base + Xvfb
-│   └── renew.py                # Probe → re-auth → log
+│   ├── renew.py                # Visit URL → sign in if needed → wait for activation API → log
+│   └── utils.py                # format_log_line + rotate_debug (TDD'd in tests/)
 ├── secrets.env                 # op:// references only (no actual secrets)
 ├── run.sh                      # Wrapper: op run + docker run, appends to log
 ├── profile/                    # Persistent Chromium profile (volume)
@@ -105,7 +106,7 @@ Container (Debian + Xvfb + headful Chromium + Playwright Python)
 
 /etc/systemd/system/
 ├── wapo-renew.service          # Type=oneshot, ExecStart=/home/nach/wapo-auto-login/run.sh
-└── wapo-renew.timer            # OnUnitActiveSec=4d, Persistent=true
+└── wapo-renew.timer            # OnCalendar=Mon,Fri 04:00, Persistent=true
 
 /home/nach/.config/op/
 └── service-account-token       # mode 600, owner nach

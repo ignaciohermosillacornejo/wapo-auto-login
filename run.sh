@@ -33,3 +33,7 @@ op run --env-file="$SCRIPT_DIR/secrets.env" -- \
     -e WAPO_PASSWORD \
     wapo-renew:latest \
   | tee -a renew.log
+
+# Propagate docker's exit code, not tee's. `pipefail` would catch this too,
+# but being explicit means a future reader doesn't have to know that.
+exit "${PIPESTATUS[0]}"

@@ -35,13 +35,13 @@ The sign-in is a two-step UI: enter email → click sign-in → password field a
 
 ## Idempotency probe
 
-Since visiting the special-offers URL always re-mints the entitlement (per the SPL page's instruction: "Continued access requires you to use this link again and login with the same username and password you originally created"), the cheapest probe is just: visit the URL. If the persistent profile has valid WaPo cookies, the sign-in form will not appear and the API call still fires (idempotent re-mint).
+**Update after first smoke test:** the initial assumption that "visiting the URL always re-mints" turned out to be wrong. When the WaPo account already has an active entitlement, the page short-circuits with the text "Looks like you're already a subscriber" and **does not** fire the activation API. So the shipped script handles three states (not two):
 
-So the script logic simplifies to:
-1. Visit special-offers URL
-2. If sign-in form is visible (logged out), perform sign-in
-3. Wait for the entitlement API 200 response
-4. Done
+1. Visit the special-offers URL
+2. Race two locators:
+   - WaPo sign-in form ("Email address" textbox) → entitlement lapsed; sign in, then wait for activation API → 200
+   - "Looks like you're already a subscriber" heading → entitlement still active; log `skip-still-active` and exit
+3. Anything else (neither locator appears within ~20s) → unrecognized state; dump screenshot/HTML/trace to `debug/` for postmortem
 
 No separate probe URL needed.
 
