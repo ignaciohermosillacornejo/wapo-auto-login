@@ -1,0 +1,7 @@
+profile/
+debug/
+secrets.env
+recon/trace.zip
+recon/recorded.py
+*.log
+.DS_Store
