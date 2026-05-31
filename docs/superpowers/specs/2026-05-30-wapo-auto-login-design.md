@@ -27,30 +27,32 @@ Source: prior mailbox audit of `hermosillaignacio@gmail.com`.
 - This is the **WaPo "access through your local library/university" partnership** — not PressReader. Web + native-app access.
 - The durable credential is the SPL library login; the WaPo entitlement is a derivative re-minted on each library hand-off. **An automation that only refreshes WaPo cookies will eventually fail** — it must replay the library login end-to-end.
 
-## Unknowns (to be resolved in Stage 1 recon)
+## Stage 1 recon findings (resolved 2026-05-30)
 
-- SPL's identity provider / middleware (BiblioCommons? EZproxy? OpenAthens? OCLC? custom?).
-- Exact redirect chain from SPL resource page → library login → WaPo subscription confirmation.
-- Form selectors for SPL card + PIN, and for the WaPo sign-in challenge (if presented).
-- Whether CAPTCHA appears on either side. If yes on every attempt, full automation is infeasible and the project pivots to "session keepalive + alert when manual login needed".
-- The exact DOM signature that means "entitlement currently active" (used by the idempotency probe).
+See `recon/flow-notes.md` for full notes. Summary:
+
+- **No SPL IdP.** The SPL page's "use this link" is a static link to `https://www.washingtonpost.com/subscribe/signin/special-offers/?s_oe=SPECIALOFFER_SEATTLEPL`. WaPo's own sign-in plus the `s_oe` query string is what grants the entitlement. No library-card form anywhere in the flow.
+- **Selectors:** email/password are `get_by_role("textbox", name=...)`; the submit button is `[data-test-id="sign-in-btn"]` (reused for both screens of the two-step sign-in).
+- **Success signal:** the XHR `POST https://subscribe.washingtonpost.com/subscriptionapi/v2/subscriptions/special-offers` returning 200 — this is the API that mints the entitlement.
+- **No CAPTCHA observed.** Decision: PROCEED with automation.
+- **Probe simplification:** since visiting the special-offers URL always re-mints when logged in, the cheapest "idempotency probe" is the visit itself — no separate probe URL needed.
 
 ## Architecture
 
 ```
-systemd timer (OnUnitActiveSec=4d, Persistent=true)
+systemd timer (Mon,Fri 04:00, Persistent=true)
    │
    ▼
 wapo-renew.service  →  /home/nach/wapo-auto-login/run.sh
    │
    ├─ op run --env-file=secrets.env  ◄── resolves op:// refs at runtime
-   │     SPL_CARD, SPL_PIN, WAPO_EMAIL, WAPO_PASSWORD
+   │     WAPO_EMAIL, WAPO_PASSWORD
    │
    ▼
 docker run --rm \
    -v /home/nach/wapo-auto-login/profile:/profile \
    -v /home/nach/wapo-auto-login/debug:/debug \
-   -e SPL_CARD -e SPL_PIN -e WAPO_EMAIL -e WAPO_PASSWORD \
+   -e WAPO_EMAIL -e WAPO_PASSWORD \
    wapo-renew:latest
    │
    ▼
@@ -58,16 +60,15 @@ Container (Debian + Xvfb + headful Chromium + Playwright Python)
    │
    ├─ Launch persistent context from /profile  ◄── cookies survive runs
    │
-   ├─ STEP 1: PROBE — visit washingtonpost.com/my-post/account/subscription
-   │           ├─ Entitlement still active? → log "skip", exit 0
-   │           └─ Lapsed? → STEP 2
+   ├─ Set up expect_response waiter for the activation API
    │
-   ├─ STEP 2: RE-AUTH (selectors from Stage 1 recon)
-   │           ├─ Open SPL WaPo resource page → "Access"
-   │           ├─ Submit SPL card + PIN
-   │           ├─ Follow redirect chain to washingtonpost.com
-   │           ├─ Sign in to WaPo if challenged
-   │           └─ Assert "subscription active" confirmation selector
+   ├─ Navigate to https://www.washingtonpost.com/subscribe/signin/special-offers/?s_oe=SPECIALOFFER_SEATTLEPL
+   │           ├─ If WaPo sign-in form is visible → fill email/password and submit (two-step UI)
+   │           └─ Else (cookies still valid) → no-op; the visit alone re-mints
+   │
+   └─ Wait for `POST .../subscriptionapi/v2/subscriptions/special-offers` → 200
+              ├─ Got it → log "ok", exit 0
+              └─ Timeout / non-200 → dump screenshot + HTML + Playwright trace
    │
    ├─ On failure: dump screenshot + page HTML + Playwright trace to /debug/
    │              (rotate, keep last 5 runs)
@@ -83,7 +84,7 @@ Container (Debian + Xvfb + headful Chromium + Playwright Python)
 - **Headful Chromium under Xvfb** (not pure headless). More believable to bot mitigation; Xvfb provides the virtual display on the headless box.
 - **systemd timer with `Persistent=true`**, not cron. Catches up after seattle-server reboots; journald gives free log retention.
 - **Cadence: every 4 days.** Within the 3–5 day recommended window. Two-day buffer against a single failed run before the entitlement lapses.
-- **Two credential pairs** (SPL card+PIN, WaPo email+password) resolved via `op run` from 1Password at runtime. Secrets never written to disk on seattle-server (1P service account token is the only persistent secret on disk).
+- **Single credential pair** (WaPo email+password) resolved via `op run` from 1Password at runtime. Stage 1 recon confirmed the SPL "library access" link is just a static URL to a WaPo special-offers endpoint — no SPL library-card login is in the flow. Secrets never written to disk on seattle-server (1P service account token is the only persistent secret on disk).
 - **Ephemeral container** (`--rm`). Nothing to restart on reboot; the timer is the only persistent piece.
 - **All-Docker convention.** Matches the existing seattle-server pattern (HA, ESPHome, Caddy, Pi-hole all in Docker).
 - **Failure observability.** Log-to-file only (per user preference). No active notifications. Failures discovered when the WaPo paywall comes back; debug artifacts available in `/debug/` for postmortem.
@@ -132,14 +133,11 @@ Container (Debian + Xvfb + headful Chromium + Playwright Python)
 Assumed in `Private` vault (confirm during implementation; rename in spec if different):
 
 - `WaPo SPL` — fields: `username` (email), `password`
-- `Seattle Public Library` — fields: `card_number`, `pin`
 
 `secrets.env` contains only `op://` references:
 ```
 WAPO_EMAIL=op://Private/WaPo SPL/username
 WAPO_PASSWORD=op://Private/WaPo SPL/password
-SPL_CARD=op://Private/Seattle Public Library/card_number
-SPL_PIN=op://Private/Seattle Public Library/pin
 ```
 
 A 1Password **service account** token is provisioned for unattended use, stored at `/home/nach/.config/op/service-account-token` (mode 600). `run.sh` exports it as `OP_SERVICE_ACCOUNT_TOKEN` before invoking `op run`.
@@ -176,9 +174,8 @@ Add:
 - Project script `renew.py`
 - Entrypoint that starts `Xvfb :99` in background, exports `DISPLAY=:99`, then runs `renew.py`
 
-`renew.py` structure:
+`renew.py` structure (post-recon — see plan Task 6 for the full code):
 ```python
-# Pseudocode — exact selectors filled in after Stage 1
 def main():
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
@@ -187,18 +184,17 @@ def main():
             viewport={"width": 1280, "height": 800},
         )
         page = ctx.new_page()
-        if probe_entitlement_active(page):
-            log("skip: entitlement still active")
-            return 0
-        reauth_via_spl(page)
-        if not probe_entitlement_active(page):
-            dump_debug(page, "post-reauth probe still inactive")
-            return 1
-        log("ok: re-authenticated")
+        # Arm the activation-API waiter BEFORE navigating, so a returning
+        # user (whose response fires on page load) isn't missed.
+        with page.expect_response(is_activation_200, timeout=60_000) as resp:
+            page.goto(SPECIAL_OFFERS_URL)
+            sign_in_if_needed(page, email, password)
+        resp.value  # raises on timeout
+        log("ok: entitlement minted")
         return 0
 ```
 
-The probe visits `https://www.washingtonpost.com/my-post/account/subscription` and asserts on a DOM signature captured in Stage 1 (e.g., presence of an "Active" badge or absence of a "Subscribe" CTA — Stage 1 picks one).
+The activation API (`POST .../subscriptionapi/v2/subscriptions/special-offers` → 200) is the success signal — no separate probe URL or DOM-state check needed. If the persistent profile still has WaPo cookies, the sign-in form never appears and the API fires on page load; if the cookies are stale, the form appears and the script signs in, which then triggers the API call.
 
 ## Scheduling
 

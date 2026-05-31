@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build an unattended weekly job on `seattle-server` that drives a headless browser through the SPL → WaPo library-card login, refreshing nach's WaPo entitlement before it lapses.
+**Goal:** Build an unattended weekly job on `seattle-server` that drives a headless browser to the WaPo SPL special-offers URL and re-signs in if needed, refreshing nach's WaPo entitlement before it lapses.
 
 **Architecture:** Playwright (Python) running headful Chromium under Xvfb inside a Docker container. Persistent browser profile on a host-mounted volume; probe-first idempotency so most runs are a sub-second "still active" check. Scheduled by a systemd timer (`Mon,Fri 04:00` with `Persistent=true`). Secrets resolved at runtime via `op run` from a 1Password service account; nothing sensitive on disk except the service-account token (mode 600).
 
@@ -61,7 +61,11 @@ Skip — first real commit comes at the end of Task 1.
 
 ---
 
-## Task 1: Stage 1 reconnaissance
+## Task 1: Stage 1 reconnaissance — ✅ COMPLETE (2026-05-30)
+
+Findings captured in `recon/flow-notes.md`. Notable surprise: the SPL "library access" link is just a static link to `https://www.washingtonpost.com/subscribe/signin/special-offers/?s_oe=SPECIALOFFER_SEATTLEPL` — there is no SPL library-card login form anywhere in the flow. The whole project simplified: one credential pair (WaPo email + password), one URL, no separate probe. Decision: PROCEED (no CAPTCHA observed). Task 6 below reflects the simplified flow with real selectors filled in.
+
+The instructions below remain as a record of the recon process for posterity.
 
 Capture the actual SPL → WaPo login flow before writing any production code. This is the prerequisite to every later task.
 
@@ -206,8 +210,6 @@ cat > secrets.env.example <<'EOF'
 # matching your actual 1Password item names.
 WAPO_EMAIL=op://Private/WaPo SPL/username
 WAPO_PASSWORD=op://Private/WaPo SPL/password
-SPL_CARD=op://Private/Seattle Public Library/card_number
-SPL_PIN=op://Private/Seattle Public Library/pin
 EOF
 ```
 
@@ -522,23 +524,24 @@ git commit -m "Add rotate_debug helper with TDD"
 
 ---
 
-## Task 6: `renew.py` — probe + re-auth + main
+## Task 6: `renew.py` — sign-in flow + main
 
-The browser-driving code. Cannot be meaningfully unit-tested (needs a real Chromium + live SPL/WaPo) — validated by the end-to-end smoke test in Task 8.
+The browser-driving code. Selectors are filled in from `recon/flow-notes.md`. Cannot be meaningfully unit-tested (needs a real Chromium + live WaPo) — validated by the end-to-end smoke test in Task 8.
 
 **Files:**
 - Modify: `docker/renew.py`
 
 - [ ] **Step 1: Write the full `docker/renew.py`**
 
-Replace the stub with the full implementation. Selectors marked `# from flow-notes.md` must be filled in using the actual selectors captured in Task 1.
+Replace the stub with the implementation below. All selectors are captured from Stage 1 recon (see `recon/flow-notes.md`).
 
 ```python
 #!/usr/bin/env python3
-"""Refresh nach's WaPo entitlement via Seattle Public Library.
+"""Refresh nach's WaPo entitlement via the Seattle Public Library special-offers URL.
 
-Idempotent: probes the WaPo subscription page first and exits 0 without re-authing
-if the entitlement is still active. Only walks the full login flow when needed.
+The SPL "library access" link is a static link to a WaPo special-offers URL; visiting
+it while logged in re-mints the free-trial entitlement. This script visits that URL,
+signs in to WaPo if the form is shown, and waits for the entitlement API to fire.
 """
 import os
 import sys
@@ -554,22 +557,15 @@ PROFILE_DIR = Path("/profile")
 DEBUG_DIR = Path("/debug")
 DEBUG_KEEP = 5
 
-# Captured in Stage 1 (recon/flow-notes.md). Fill in actual values.
-PROBE_URL = "https://www.washingtonpost.com/my-post/account/subscription"
-PROBE_ACTIVE_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"  # selector present only when entitlement is active
-
-SPL_RESOURCE_URL = "https://www.spl.org/books-and-media/digital-magazines-and-newspapers/the-washington-post-digital"
-SPL_ACCESS_LINK_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-SPL_CARD_INPUT_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-SPL_PIN_INPUT_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-SPL_SUBMIT_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-
-WAPO_EMAIL_INPUT_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-WAPO_EMAIL_CONTINUE_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-WAPO_PASSWORD_INPUT_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-WAPO_SIGNIN_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"
-
-REAUTH_CONFIRMATION_SELECTOR = "FILL-IN-FROM-FLOW-NOTES"  # selector that appears after successful re-auth
+# Captured in Stage 1 recon (recon/flow-notes.md).
+SPECIAL_OFFERS_URL = (
+    "https://www.washingtonpost.com/subscribe/signin/special-offers/"
+    "?s_oe=SPECIALOFFER_SEATTLEPL"
+)
+# The XHR whose 200 response signals "entitlement minted".
+ACTIVATION_API_URL = (
+    "https://subscribe.washingtonpost.com/subscriptionapi/v2/subscriptions/special-offers"
+)
 
 
 def now_ts() -> str:
@@ -593,43 +589,27 @@ def require_env(name: str) -> str:
     return val
 
 
-def probe_entitlement_active(page: Page) -> bool:
-    """Visit the WaPo subscription page; return True iff entitlement is currently active."""
-    page.goto(PROBE_URL, wait_until="domcontentloaded", timeout=30_000)
+def sign_in_if_needed(page: Page, *, wapo_email: str, wapo_password: str) -> bool:
+    """If the WaPo sign-in form is visible on the current page, fill and submit it.
+
+    Returns True if a sign-in was performed, False if the form was not shown
+    (meaning the persistent profile already has a valid WaPo session).
+    """
+    email_input = page.get_by_role("textbox", name="Email address")
     try:
-        page.wait_for_selector(PROBE_ACTIVE_SELECTOR, timeout=10_000)
-        return True
+        email_input.wait_for(state="visible", timeout=10_000)
     except PWTimeout:
         return False
 
+    # Two-step sign-in: email screen → password screen. Same button selector for both.
+    email_input.fill(wapo_email)
+    page.locator('[data-test-id="sign-in-btn"]').click()
 
-def reauth_via_spl(page: Page, *, spl_card: str, spl_pin: str,
-                   wapo_email: str, wapo_password: str) -> None:
-    """Drive the full SPL → WaPo login. Raises on failure."""
-    page.goto(SPL_RESOURCE_URL, wait_until="domcontentloaded", timeout=30_000)
-    page.click(SPL_ACCESS_LINK_SELECTOR, timeout=15_000)
-
-    # SPL library-card login
-    page.fill(SPL_CARD_INPUT_SELECTOR, spl_card, timeout=15_000)
-    page.fill(SPL_PIN_INPUT_SELECTOR, spl_pin)
-    page.click(SPL_SUBMIT_SELECTOR)
-
-    # WaPo sign-in — only some attempts will see this (depends on session state).
-    # Try the sign-in path with a short timeout; if the email field doesn't appear,
-    # assume SSO carried us through and fall through to the confirmation wait.
-    try:
-        page.wait_for_selector(WAPO_EMAIL_INPUT_SELECTOR, timeout=10_000)
-        page.fill(WAPO_EMAIL_INPUT_SELECTOR, wapo_email)
-        page.click(WAPO_EMAIL_CONTINUE_SELECTOR)
-        page.wait_for_selector(WAPO_PASSWORD_INPUT_SELECTOR, timeout=15_000)
-        page.fill(WAPO_PASSWORD_INPUT_SELECTOR, wapo_password)
-        page.click(WAPO_SIGNIN_SELECTOR)
-    except PWTimeout:
-        # No sign-in form appeared — either SSO succeeded or the page structure
-        # differs. Either way, the next wait_for_selector decides success.
-        pass
-
-    page.wait_for_selector(REAUTH_CONFIRMATION_SELECTOR, timeout=45_000)
+    password_input = page.get_by_role("textbox", name="Password")
+    password_input.wait_for(state="visible", timeout=15_000)
+    password_input.fill(wapo_password)
+    page.locator('[data-test-id="sign-in-btn"]').click()
+    return True
 
 
 def dump_debug(page: Page, kind: str) -> Path:
@@ -644,8 +624,6 @@ def dump_debug(page: Page, kind: str) -> Path:
 
 
 def main() -> int:
-    spl_card = require_env("SPL_CARD")
-    spl_pin = require_env("SPL_PIN")
     wapo_email = require_env("WAPO_EMAIL")
     wapo_password = require_env("WAPO_PASSWORD")
 
@@ -662,29 +640,26 @@ def main() -> int:
             viewport={"width": 1280, "height": 800},
             args=["--disable-blink-features=AutomationControlled"],
         )
-        # Start tracing so failures are replayable.
         ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
         page = ctx.new_page()
 
         try:
-            if probe_entitlement_active(page):
-                log(status="ok", kind="skip-still-active", detail=f"probe={PROBE_URL}")
-                return 0
+            # Set up the activation-API waiter BEFORE navigation so we can't miss
+            # the response if it fires immediately on page load (returning user case).
+            with page.expect_response(
+                lambda r: r.url.startswith(ACTIVATION_API_URL) and r.status == 200,
+                timeout=60_000,
+            ) as response_info:
+                page.goto(SPECIAL_OFFERS_URL, wait_until="domcontentloaded", timeout=30_000)
+                signed_in = sign_in_if_needed(
+                    page, wapo_email=wapo_email, wapo_password=wapo_password,
+                )
 
-            reauth_via_spl(
-                page,
-                spl_card=spl_card, spl_pin=spl_pin,
-                wapo_email=wapo_email, wapo_password=wapo_password,
-            )
+            response_info.value  # raises if the wait timed out
 
-            if not probe_entitlement_active(page):
-                target = dump_debug(page, kind="post-reauth-probe-failed")
-                ctx.tracing.stop(path=str(target / "trace.zip"))
-                log(status="fail", kind="post-reauth-probe-failed", detail=f"debug={target}")
-                return 1
-
+            kind = "reauth-success" if signed_in else "refresh-already-signed-in"
             duration = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
-            log(status="ok", kind="reauth-success", detail=f"duration={int(duration)}s")
+            log(status="ok", kind=kind, detail=f"duration={int(duration)}s")
             return 0
 
         except Exception as e:
@@ -696,6 +671,10 @@ def main() -> int:
             log(status="fail", kind="exception", detail=f"err={type(e).__name__} debug={target}")
             return 1
         finally:
+            try:
+                ctx.tracing.stop()  # no-op if already stopped
+            except Exception:
+                pass
             ctx.close()
 
 
@@ -703,7 +682,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 2: Rebuild the image (selectors are still placeholders — that's fine; rebuild proves syntax)**
+- [ ] **Step 2: Rebuild the image**
 
 ```bash
 cd docker
@@ -713,21 +692,11 @@ cd ..
 
 Expected: build succeeds.
 
-- [ ] **Step 3: Replace placeholders with real selectors from `recon/flow-notes.md`**
-
-Open `docker/renew.py`; replace every `"FILL-IN-FROM-FLOW-NOTES"` and `PROBE_URL` (if the recon turned up a different URL) with the captured selectors.
-
-- [ ] **Step 4: Rebuild with real selectors**
-
-```bash
-cd docker && docker build -t wapo-renew:latest . && cd ..
-```
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docker/renew.py
-git commit -m "Implement renew.py: probe, re-auth, debug capture"
+git commit -m "Implement renew.py: visit special-offers URL, sign in, wait for activation API"
 ```
 
 ---
@@ -769,8 +738,6 @@ op run --env-file="$SCRIPT_DIR/secrets.env" -- \
   docker run --rm \
     -v "$SCRIPT_DIR/profile:/profile" \
     -v "$SCRIPT_DIR/debug:/debug" \
-    -e SPL_CARD \
-    -e SPL_PIN \
     -e WAPO_EMAIL \
     -e WAPO_PASSWORD \
     wapo-renew:latest \
@@ -824,7 +791,6 @@ Expected: prints service account info (`URL`, `Email: service account`).
 
 ```bash
 op item get "WaPo SPL" --format json | jq '.fields[] | {label,id}'
-op item get "Seattle Public Library" --format json | jq '.fields[] | {label,id}'
 ```
 
 Expected: lists fields. **If item names or field labels differ from the spec assumptions, update `secrets.env.example` and re-stage it** (no commit yet — Task 9 will be a follow-up if needed).
@@ -840,10 +806,10 @@ cp secrets.env.example secrets.env
 - [ ] **Step 4: Sanity-check that `op run` can resolve everything**
 
 ```bash
-op run --env-file=secrets.env -- bash -c 'echo "card prefix: ${SPL_CARD:0:3}... email: $WAPO_EMAIL"'
+op run --env-file=secrets.env -- bash -c 'echo "email: $WAPO_EMAIL  password length: ${#WAPO_PASSWORD}"'
 ```
 
-Expected: prints something like `card prefix: 290... email: hermosillaignacio@gmail.com`. If any var prints empty, fix the op:// reference in `secrets.env`.
+Expected: prints something like `email: hermosillaignacio@gmail.com  password length: 24`. If `$WAPO_PASSWORD` length is 0, fix the op:// reference in `secrets.env`.
 
 - [ ] **Step 5: First end-to-end run (empty profile → full login expected)**
 
@@ -1097,9 +1063,9 @@ Automated weekly re-authentication to The Washington Post via Seattle Public Lib
 
 Every Monday and Friday at 04:00 (local time, +/- 2h jitter), `seattle-server` runs a headless Chromium that:
 
-1. Probes the WaPo subscription page using a persistent Chromium profile.
-2. If the entitlement is still active, exits immediately.
-3. Otherwise, walks the SPL → WaPo library-card login flow and re-mints the entitlement.
+1. Loads `https://www.washingtonpost.com/subscribe/signin/special-offers/?s_oe=SPECIALOFFER_SEATTLEPL` using a persistent Chromium profile (cookies survive across runs).
+2. If the WaPo sign-in form is visible, fills in email + password (two-step sign-in).
+3. Waits for the activation API (`POST .../subscriptionapi/v2/subscriptions/special-offers`) to return 200 — that's the signal the entitlement was minted.
 
 Logs land in `/home/nach/wapo-auto-login/renew.log` and in journald (`journalctl -u wapo-renew.service`). Failure artifacts (screenshot + DOM + Playwright trace) accumulate under `debug/`; only the most recent 5 are kept.
 

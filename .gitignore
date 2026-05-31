@@ -1,7 +1,8 @@
 profile/
 debug/
 secrets.env
-recon/trace.zip
+recon/*.zip
+recon/*.har
 recon/recorded.py
 *.log
 .DS_Store
