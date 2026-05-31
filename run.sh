@@ -18,6 +18,10 @@ fi
 OP_SERVICE_ACCOUNT_TOKEN="$(cat "$OP_TOKEN_FILE")"
 export OP_SERVICE_ACCOUNT_TOKEN
 
+# Pre-create mount dirs as the host user. If Docker creates them, they're
+# root-owned and the container's non-root pwuser can't write into them.
+mkdir -p "$SCRIPT_DIR/profile" "$SCRIPT_DIR/debug"
+
 # `op run --env-file=secrets.env` resolves the op:// references and exports
 # the real values into the child process environment (never written to disk).
 # Those env vars are then forwarded into the container with `-e VAR`.
