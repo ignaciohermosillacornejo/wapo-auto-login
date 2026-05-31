@@ -109,8 +109,8 @@ def main() -> int:
             # Set up the activation-API waiter BEFORE navigation so we can't miss
             # the response if it fires immediately on page load (returning user case).
             with page.expect_response(
-                lambda r: r.url.startswith(ACTIVATION_API_URL) and r.status == 200,
-                timeout=60_000,
+                lambda r: r.url == ACTIVATION_API_URL and r.status == 200,
+                timeout=90_000,
             ) as response_info:
                 page.goto(SPECIAL_OFFERS_URL, wait_until="domcontentloaded", timeout=30_000)
                 signed_in = sign_in_if_needed(
@@ -133,10 +133,6 @@ def main() -> int:
             log(status="fail", kind="exception", detail=f"err={type(e).__name__} debug={target}")
             return 1
         finally:
-            try:
-                ctx.tracing.stop()  # no-op if already stopped
-            except Exception:
-                pass
             ctx.close()
 
 
