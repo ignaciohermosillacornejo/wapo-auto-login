@@ -1,7 +1,12 @@
 profile/
 debug/
 secrets.env
-recon/trace.zip
+recon/*.zip
+recon/*.har
 recon/recorded.py
 *.log
 .DS_Store
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

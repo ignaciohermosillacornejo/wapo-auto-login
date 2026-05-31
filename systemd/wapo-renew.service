@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh Washington Post SPL entitlement
+After=docker.service tailscaled.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nach
+Group=nach
+WorkingDirectory=/home/nach/wapo-auto-login
+ExecStart=/home/nach/wapo-auto-login/run.sh
+
+# Limit per-invocation runtime; if the bot hangs, fail fast and let next cycle retry.
+TimeoutStartSec=300
+
+# Capture stdout/stderr to journald (in addition to renew.log).
+StandardOutput=journal
+StandardError=journal
