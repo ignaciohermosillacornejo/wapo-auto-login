@@ -4,6 +4,8 @@ Unattended re-authentication to The Washington Post via the Seattle Public Libra
 
 If you're a Seattle Public Library cardholder, [SPL gives you free Washington Post Digital access](https://www.spl.org/books-and-media/digital-magazines-and-newspapers/the-washington-post-digital) — but the entitlement lapses every ~7 days and you have to manually re-walk the login flow each time. This automates that walk.
 
+> **⚠️ Geo-restricted.** WaPo checks the request IP against the SPL partnership's allowed region. The host running this script needs a public IP that geolocates to **Washington State** (almost certainly the Seattle metro; foreign and out-of-state IPs are known to fail silently — the activation API returns 200-but-doesn't-mint, or the offer page swaps to an ineligible variant). If your home server is in WA, you're fine. If you tunnel out via a VPN exit node outside WA, this will stop working until you route back through WA.
+
 ```
 2026-05-31T07:22:30Z	ok	reauth-success	            duration=6s
 2026-05-31T07:23:19Z	ok	skip-still-active	    duration=3s
@@ -73,6 +75,7 @@ Visit special-offers URL → race two states:
 
 ## Requirements
 
+- **A host with a Washington State IP.** The SPL ↔ WaPo partnership geo-restricts the entitlement to in-state requests (see callout above). This is the most common reason the script "runs successfully" but the paywall comes back anyway.
 - A Linux host (tested on Ubuntu 24.04, x86_64)
 - Docker (the user running this in the docker group)
 - systemd
@@ -135,6 +138,7 @@ The unit files assume the project lives at `/home/nach/wapo-auto-login` and runs
 | `fail exception err=TimeoutError` | WaPo changed selectors, or activation API URL changed | Re-run Stage 1 recon (`playwright codegen`), update constants at top of `docker/renew.py`, rebuild |
 | `fail missing-op-token path=…` | Service-account token missing or unreadable | Restore the token file at the expected path, mode 600 |
 | `fail exception err=PWError` and the screenshot shows a CAPTCHA | WaPo started challenging this account | The bot can't solve CAPTCHAs. Wipe `profile/`, sign in once manually (e.g. via VNC into Xvfb on the host), let cookies populate the profile, then re-enable the timer |
+| Runs log `reauth-success` but the paywall is still there in your browser | Host IP is outside Washington State | Geo-restriction (see the callout at the top). Check the host's public IP geolocation; move the host or route through a WA-state exit |
 | `Permission denied (13)` on `/profile/SingletonLock` (Linux) | Mount source dirs got root-owned because Docker created them on first run | Already handled by `run.sh` (it `mkdir -p`s the dirs as the host user). If you hit this manually, `chown -R $USER:$USER profile/ debug/` |
 | Service runs but the container can't connect to Docker | The systemd-running user isn't in the `docker` group | `sudo usermod -aG docker $USER`, then log out / log in (group membership applies to new sessions) |
 
@@ -164,11 +168,12 @@ Walk through the SPL → WaPo flow manually in the spawned Chromium; selectors, 
 
 ## Caveats
 
+- **Geo-restricted to Washington State** (re-emphasized — this catches everyone). The script will run, log `reauth-success`, and look healthy from an out-of-state host, but the WaPo paywall in your browser will not actually lift. Verify by visiting [a paywalled WaPo article](https://www.washingtonpost.com/) in a regular browser after the first run.
 - **Personal single-user use only.** This automates your own credentials against your own WaPo account. Don't share, don't multi-tenant.
 - **Library and newspaper ToS** generally restrict automated access. Refreshing your own personal entitlement is a low-risk grey area; scraping or redistributing content is not. Proceed at your own risk.
 - **Brittle by nature.** This will break the day WaPo changes their sign-in selectors or the activation API URL. The fix is straightforward (re-run Stage 1 recon, update three constants), but there's no graceful degradation — you'll just see `fail` in `renew.log` and stop getting renewals.
 - **Not a paywall bypass.** This relies on the specific SPL ↔ WaPo partnership, which the library already offers to cardholders. It's not a general newspaper-access trick.
-- **Other libraries**: many US public libraries have the same WaPo partnership ([NYPL](https://www.nypl.org/), [LAPL](https://www.lapl.org/), [BPL](https://www.bklynlibrary.org/), etc.). Each has its own `s_oe=…` parameter; you'd need to capture yours via Stage 1 recon and swap the constant in `docker/renew.py`.
+- **Other libraries**: many US public libraries have the same WaPo partnership ([NYPL](https://www.nypl.org/), [LAPL](https://www.lapl.org/), [BPL](https://www.bklynlibrary.org/), etc.). Each has its own `s_oe=…` parameter **and its own geo-restriction** (typically the library's home state). You'd need to capture yours via Stage 1 recon, swap the constant in `docker/renew.py`, and run from a host inside the allowed region.
 
 ## License
 
