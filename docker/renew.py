@@ -28,6 +28,9 @@ SPECIAL_OFFERS_URL = (
 ACTIVATION_API_URL = (
     "https://subscribe.washingtonpost.com/subscriptionapi/v2/subscriptions/special-offers"
 )
+# Text WaPo shows on the special-offers page when the user already has an active
+# entitlement; the activation API does not fire in this case.
+ALREADY_SUBSCRIBED_TEXT = "Looks like you're already a subscriber"
 
 
 def now_ts() -> str:
@@ -106,22 +109,36 @@ def main() -> int:
         page = ctx.new_page()
 
         try:
-            # Set up the activation-API waiter BEFORE navigation so we can't miss
-            # the response if it fires immediately on page load (returning user case).
+            page.goto(SPECIAL_OFFERS_URL, wait_until="domcontentloaded", timeout=30_000)
+
+            # The page can land in one of two recognized states:
+            #   1. Sign-in form visible — entitlement is lapsed (or cold profile);
+            #      signing in triggers the activation API which mints a fresh one.
+            #   2. "Looks like you're already a subscriber" — entitlement still active;
+            #      no API call fires, nothing to do.
+            email_input = page.get_by_role("textbox", name="Email address")
+            already_subscribed = page.get_by_text(ALREADY_SUBSCRIBED_TEXT)
+            email_input.or_(already_subscribed).first.wait_for(
+                state="visible", timeout=20_000,
+            )
+
+            if already_subscribed.is_visible():
+                duration = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
+                log(status="ok", kind="skip-still-active", detail=f"duration={int(duration)}s")
+                return 0
+
+            # Sign-in path. Arm the activation-API waiter, then drive the form.
             with page.expect_response(
                 lambda r: r.url == ACTIVATION_API_URL and r.status == 200,
                 timeout=90_000,
             ) as response_info:
-                page.goto(SPECIAL_OFFERS_URL, wait_until="domcontentloaded", timeout=30_000)
-                signed_in = sign_in_if_needed(
+                sign_in_if_needed(
                     page, wapo_email=wapo_email, wapo_password=wapo_password,
                 )
-
             response_info.value  # raises if the wait timed out
 
-            kind = "reauth-success" if signed_in else "refresh-already-signed-in"
             duration = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
-            log(status="ok", kind=kind, detail=f"duration={int(duration)}s")
+            log(status="ok", kind="reauth-success", detail=f"duration={int(duration)}s")
             return 0
 
         except Exception as e:
