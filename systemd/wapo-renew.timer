@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh Washington Post SPL entitlement (timer)
+
+[Timer]
+# Mon and Fri 04:00 local time → alternating 3-day/4-day cadence (within the
+# 3–5 day recommended window). RandomizedDelaySec smears across a 2h window so
+# this isn't a perfect on-the-dot signal.
+OnCalendar=Mon,Fri 04:00
+RandomizedDelaySec=2h
+# Persistent=true catches up if seattle-server was off when a run was due.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
